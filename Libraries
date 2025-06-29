@@ -1,0 +1,3 @@
+!pip install transformers torch gradio accelerate
+!pip install pinecone-client google-auth google-auth-oauthlib
+!pip install google-api-python-client pandas
