@@ -1,0 +1,581 @@
+# Simplified EduTutor AI with Google Auth, Classroom Sync, and Pinecone DB
+# Deploy in Google Colab
+
+import gradio as gr
+import torch
+
+from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
+import json
+import pandas as pd
+from datetime import datetime
+import uuid
+import re
+from typing import Dict, List, Tuple, Optional
+import requests
+import base64
+
+# Required installations for Colab
+"""
+!pip install transformers torch gradio accelerate
+!pip install pinecone-client google-auth google-auth-oauthlib google-auth-httplib2
+!pip install google-api-python-client pandas
+"""
+
+class SimplifiedEduTutorAI:
+    def _init_(self):
+        self.model_name = "ibm-granite/granite-3.0-2b-instruct"
+        self.tokenizer = None
+        self.model = None
+        self.generator = None
+        
+        # In-memory storage (replace with Pinecone in production)
+        self.users = {}  # Google user data
+        self.quizzes = {}  # Quiz data with answers (backend)
+        self.student_quizzes = {}  # Quiz data without answers (frontend)
+        self.submissions = {}  # Student submissions
+        self.classroom_data = {}  # Google Classroom sync data
+        
+        # Current user session
+        self.current_user = None
+        self.user_role = None  # 'student' or 'educator'
+        
+        self._load_model()
+        self._setup_pinecone()
+    
+    def _load_model(self):
+        """Load IBM Granite model for quiz generation"""
+        try:
+            print("🔄 Loading IBM Granite model...")
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            if self.tokenizer.pad_token is None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16,
+                device_map="auto",
+                trust_remote_code=True
+            )
+            
+            self.generator = pipeline(
+                "text-generation",
+                model=self.model,
+                tokenizer=self.tokenizer,
+                max_length=512,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=self.tokenizer.pad_token_id
+            )
+            print("✅ Model loaded successfully!")
+        except Exception as e:
+            print(f"⚠️ Error loading Granite model: {e}")
+            print("🔄 Using fallback model...")
+            self.generator = pipeline("text-generation", model="distilgpt2")
+    
+    def _setup_pinecone(self):
+        """Setup Pinecone connection (mock for demo)"""
+        # In production, initialize Pinecone here
+        # pinecone.init(api_key="your-key", environment="your-env")
+        print("📌 Pinecone setup completed (mock)")
+    
+    def simulate_google_login(self, email: str, role: str) -> Tuple[bool, str]:
+        """Simulate Google OAuth login"""
+        if not email or "@" not in email:
+            return False, "Invalid email format"
+        
+        # Mock Google user data
+        user_id = email.split("@")[0]
+        self.current_user = {
+            "id": user_id,
+            "email": email,
+            "name": email.split("@")[0].title(),
+            "role": role,
+            "login_time": datetime.now().isoformat()
+        }
+        
+        self.users[user_id] = self.current_user
+        self.user_role = role
+        
+        return True, f"✅ Logged in as {self.current_user['name']} ({role})"
+    
+    def sync_google_classroom(self, user_id: str) -> str:
+        """Mock Google Classroom data sync"""
+        if not self.current_user:
+            return "❌ Please login first"
+        
+        # Mock classroom data
+        mock_classroom_data = {
+            "classes": [
+                {"id": "class_1", "name": "Mathematics Grade 10", "students": 25},
+                {"id": "class_2", "name": "Science Grade 9", "students": 30},
+                {"id": "class_3", "name": "English Literature", "students": 20}
+            ],
+            "students": [
+                {"id": "student_1", "name": "Alice Johnson", "email": "alice@school.edu"},
+                {"id": "student_2", "name": "Bob Smith", "email": "bob@school.edu"},
+                {"id": "student_3", "name": "Carol Davis", "email": "carol@school.edu"}
+            ]
+        }
+        
+        self.classroom_data[user_id] = mock_classroom_data
+        return f"✅ Synced {len(mock_classroom_data['classes'])} classes and {len(mock_classroom_data['students'])} students"
+    
+    def generate_ai_quiz(self, topic: str, num_questions: int, difficulty: str) -> Tuple[str, Dict]:
+        """Generate MCQ quiz using Granite model"""
+        if not self.current_user:
+            return "❌ Please login first", {}
+        
+        quiz_id = str(uuid.uuid4())[:8]
+        questions_data = []
+        
+        for i in range(num_questions):
+            prompt = f"""Generate a multiple choice question about {topic} at {difficulty} level.
+
+Format your response exactly like this:
+Question: [Your question here]
+A) [Option A]
+B) [Option B] 
+C) [Option C]
+D) [Option D]
+Correct Answer: [A, B, C, or D]
+Explanation: [Brief explanation]
+
+Topic: {topic}
+Difficulty: {difficulty}
+Question {i+1}:"""
+
+            try:
+                response = self.generator(prompt, max_length=300, num_return_sequences=1)
+                generated_text = response[0]['generated_text']
+                
+                # Extract question content
+                question_part = generated_text.split(f"Question {i+1}:")[-1].strip()
+                
+                # Parse the generated question (simplified parsing)
+                question_data = self._parse_question(question_part, i+1)
+                questions_data.append(question_data)
+                
+            except Exception as e:
+                # Fallback question
+                question_data = {
+                    "id": i+1,
+                    "question": f"Sample question {i+1} about {topic}",
+                    "options": {
+                        "A": "Option A",
+                        "B": "Option B", 
+                        "C": "Option C",
+                        "D": "Option D"
+                    },
+                    "correct_answer": "A",
+                    "explanation": f"This is a sample explanation for question {i+1}"
+                }
+                questions_data.append(question_data)
+        
+        # Store full quiz with answers (backend)
+        full_quiz = {
+            "id": quiz_id,
+            "topic": topic,
+            "difficulty": difficulty,
+            "created_by": self.current_user["id"],
+            "created_at": datetime.now().isoformat(),
+            "questions": questions_data
+        }
+        self.quizzes[quiz_id] = full_quiz
+        
+        # Store quiz without answers (frontend)
+        student_quiz = {
+            "id": quiz_id,
+            "topic": topic,
+            "difficulty": difficulty,
+            "questions": [
+                {
+                    "id": q["id"],
+                    "question": q["question"],
+                    "options": q["options"]
+                } for q in questions_data
+            ]
+        }
+        self.student_quizzes[quiz_id] = student_quiz
+        
+        # Store in Pinecone (mock)
+        self._store_in_pinecone(quiz_id, full_quiz)
+        
+        return f"✅ Quiz '{topic}' created with ID: {quiz_id}", student_quiz
+    
+    def _parse_question(self, text: str, question_id: int) -> Dict:
+        """Parse generated question text"""
+        try:
+            lines = text.strip().split('\n')
+            question = ""
+            options = {}
+            correct_answer = "A"
+            explanation = ""
+            
+            for line in lines:
+                line = line.strip()
+                if line.startswith("Question:"):
+                    question = line.replace("Question:", "").strip()
+                elif line.startswith(("A)", "B)", "C)", "D)")):
+                    option_letter = line[0]
+                    option_text = line[3:].strip()
+                    options[option_letter] = option_text
+                elif line.startswith("Correct Answer:"):
+                    correct_answer = line.replace("Correct Answer:", "").strip()
+                elif line.startswith("Explanation:"):
+                    explanation = line.replace("Explanation:", "").strip()
+            
+            if not question:
+                question = f"Generated question {question_id}"
+            if not options:
+                options = {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"}
+            
+            return {
+                "id": question_id,
+                "question": question,
+                "options": options,
+                "correct_answer": correct_answer,
+                "explanation": explanation
+            }
+        except:
+            return {
+                "id": question_id,
+                "question": f"Sample question {question_id}",
+                "options": {"A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D"},
+                "correct_answer": "A",
+                "explanation": "Sample explanation"
+            }
+    
+    def _store_in_pinecone(self, quiz_id: str, quiz_data: Dict):
+        """Store quiz data in Pinecone (mock implementation)"""
+        # In production, this would store in Pinecone vector database
+        print(f"📌 Storing quiz {quiz_id} in Pinecone DB")
+    
+    def submit_quiz(self, quiz_id: str, answers: Dict) -> Dict:
+        """Process student quiz submission"""
+        if not self.current_user:
+            return {"error": "Please login first"}
+        
+        if quiz_id not in self.quizzes:
+            return {"error": "Quiz not found"}
+        
+        quiz = self.quizzes[quiz_id]
+        score = 0
+        total_questions = len(quiz["questions"])
+        results = []
+        
+        for question in quiz["questions"]:
+            q_id = str(question["id"])
+            student_answer = answers.get(q_id, "")
+            correct_answer = question["correct_answer"]
+            is_correct = student_answer.upper() == correct_answer.upper()
+            
+            if is_correct:
+                score += 1
+            
+            results.append({
+                "question_id": q_id,
+                "question": question["question"],
+                "student_answer": student_answer,
+                "correct_answer": correct_answer,
+                "is_correct": is_correct,
+                "explanation": question.get("explanation", "")
+            })
+        
+        percentage = (score / total_questions) * 100 if total_questions > 0 else 0
+        
+        # Store submission
+        submission_id = str(uuid.uuid4())[:8]
+        submission = {
+            "id": submission_id,
+            "quiz_id": quiz_id,
+            "student_id": self.current_user["id"],
+            "student_name": self.current_user["name"],
+            "student_email": self.current_user["email"],
+            "score": score,
+            "total_questions": total_questions,
+            "percentage": percentage,
+            "answers": answers,
+            "results": results,
+            "submitted_at": datetime.now().isoformat()
+        }
+        
+        if quiz_id not in self.submissions:
+            self.submissions[quiz_id] = []
+        self.submissions[quiz_id].append(submission)
+        
+        # Store in Pinecone (mock)
+        self._store_submission_in_pinecone(submission_id, submission)
+        
+        return {
+            "submission_id": submission_id,
+            "score": score,
+            "total_questions": total_questions,
+            "percentage": percentage,
+            "results": results
+        }
+    
+    def _store_submission_in_pinecone(self, submission_id: str, submission: Dict):
+        """Store submission in Pinecone (mock)"""
+        print(f"📌 Storing submission {submission_id} in Pinecone DB")
+    
+    def get_educator_dashboard(self) -> str:
+        """Get educator dashboard data"""
+        if not self.current_user or self.user_role != "educator":
+            return "❌ Access denied. Educator login required."
+        
+        dashboard = f"""
+# 📊 EDUCATOR DASHBOARD - {self.current_user['name']}
+
+## 📚 Quiz Overview
+Total Quizzes Created: {len(self.quizzes)}
+
+## 👥 Student Submissions Summary
+"""
+        
+        total_submissions = 0
+        for quiz_id, submissions in self.submissions.items():
+            total_submissions += len(submissions)
+            quiz_title = self.quizzes.get(quiz_id, {}).get("topic", "Unknown Quiz")
+            dashboard += f"\n### 📝 {quiz_title} (ID: {quiz_id})\n"
+            dashboard += f"*Submissions: {len(submissions)}*\n\n"
+            
+            if submissions:
+                for submission in submissions[-3:]:  # Show last 3 submissions
+                    dashboard += f"- *{submission['student_name']}* ({submission['student_email']})\n"
+                    dashboard += f"  Score: {submission['score']}/{submission['total_questions']} ({submission['percentage']:.1f}%)\n"
+                    dashboard += f"  Submitted: {submission['submitted_at'][:19]}\n\n"
+        
+        dashboard += f"\n## 📈 Statistics\n"
+        dashboard += f"- Total Submissions: {total_submissions}\n"
+        dashboard += f"- Active Quizzes: {len([q for q in self.quizzes.values() if q.get('created_by') == self.current_user['id']])}\n"
+        
+        if self.classroom_data.get(self.current_user['id']):
+            classroom = self.classroom_data[self.current_user['id']]
+            dashboard += f"- Google Classroom Classes: {len(classroom.get('classes', []))}\n"
+            dashboard += f"- Total Students: {len(classroom.get('students', []))}\n"
+        
+        return dashboard
+    
+    def get_student_dashboard(self) -> str:
+        """Get student dashboard data"""
+        if not self.current_user or self.user_role != "student":
+            return "❌ Access denied. Student login required."
+        
+        dashboard = f"""
+# 🎓 STUDENT DASHBOARD - {self.current_user['name']}
+
+## 📚 Available Quizzes
+"""
+        
+        available_quizzes = list(self.student_quizzes.values())[:5]  # Show first 5 quizzes
+        if available_quizzes:
+            for quiz in available_quizzes:
+                dashboard += f"\n### 📝 {quiz['topic']}\n"
+                dashboard += f"- *Difficulty:* {quiz['difficulty']}\n"
+                dashboard += f"- *Questions:* {len(quiz['questions'])}\n"
+                dashboard += f"- *Quiz ID:* {quiz['id']}\n\n"
+        else:
+            dashboard += "No quizzes available at the moment.\n\n"
+        
+        # Show student's submissions
+        dashboard += "## 📊 My Submissions\n"
+        my_submissions = []
+        for quiz_submissions in self.submissions.values():
+            for submission in quiz_submissions:
+                if submission['student_id'] == self.current_user['id']:
+                    my_submissions.append(submission)
+        
+        if my_submissions:
+            my_submissions.sort(key=lambda x: x['submitted_at'], reverse=True)
+            for submission in my_submissions[:5]:  # Last 5 submissions
+                quiz_topic = self.quizzes.get(submission['quiz_id'], {}).get('topic', 'Unknown')
+                dashboard += f"\n### 📝 {quiz_topic}\n"
+                dashboard += f"- *Score:* {submission['score']}/{submission['total_questions']} ({submission['percentage']:.1f}%)\n"
+                dashboard += f"- *Submitted:* {submission['submitted_at'][:19]}\n\n"
+        else:
+            dashboard += "No submissions yet. Take a quiz to see your results!\n"
+        
+        return dashboard
+
+# Initialize the system
+edu_system = SimplifiedEduTutorAI()
+
+# Gradio Interface Functions
+def login_user(email, role):
+    success, message = edu_system.simulate_google_login(email, role)
+    if success:
+        return message, gr.update(visible=True), gr.update(visible=role=="educator"), gr.update(visible=role=="student")
+    return message, gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)
+
+def sync_classroom():
+    if not edu_system.current_user:
+        return "❌ Please login first"
+    return edu_system.sync_google_classroom(edu_system.current_user["id"])
+
+def create_quiz(topic, num_questions, difficulty):
+    if not edu_system.current_user or edu_system.user_role != "educator":
+        return "❌ Educator login required", ""
+    
+    message, quiz_data = edu_system.generate_ai_quiz(topic, int(num_questions), difficulty)
+    
+    if quiz_data:
+        quiz_display = f"## 📝 Quiz: {quiz_data['topic']}\n*ID:* {quiz_data['id']}\n*Difficulty:* {quiz_data['difficulty']}\n\n"
+        for i, q in enumerate(quiz_data['questions'], 1):
+            quiz_display += f"*{i}. {q['question']}*\n"
+            for opt, text in q['options'].items():
+                quiz_display += f"{opt}) {text}\n"
+            quiz_display += "\n"
+        return message, quiz_display
+    
+    return message, ""
+
+def load_quiz_for_student(quiz_id):
+    if not edu_system.current_user or edu_system.user_role != "student":
+        return "❌ Student login required"
+    
+    if quiz_id not in edu_system.student_quizzes:
+        return "❌ Quiz not found"
+    
+    quiz = edu_system.student_quizzes[quiz_id]
+    quiz_display = f"# 📝 {quiz['topic']}\n*Difficulty:* {quiz['difficulty']}\n\n"
+    
+    for q in quiz['questions']:
+        quiz_display += f"*Question {q['id']}: {q['question']}*\n"
+        for opt, text in q['options'].items():
+            quiz_display += f"{opt}) {text}\n"
+        quiz_display += "\n"
+    
+    return quiz_display
+
+def submit_student_quiz(quiz_id, q1_ans, q2_ans, q3_ans, q4_ans, q5_ans):
+    if not edu_system.current_user or edu_system.user_role != "student":
+        return "❌ Student login required"
+    
+    answers = {
+        "1": q1_ans, "2": q2_ans, "3": q3_ans, 
+        "4": q4_ans, "5": q5_ans
+    }
+    
+    result = edu_system.submit_quiz(quiz_id, answers)
+    
+    if "error" in result:
+        return f"❌ {result['error']}"
+    
+    results_display = f"""
+# 🎯 Quiz Results
+
+*Score:* {result['score']}/{result['total_questions']} ({result['percentage']:.1f}%)
+
+## 📋 Detailed Results:
+"""
+    
+    for r in result['results']:
+        status = "✅" if r['is_correct'] else "❌"
+        results_display += f"""
+*Question {r['question_id']}:* {r['question']}
+{status} Your Answer: {r['student_answer']} | Correct: {r['correct_answer']}
+Explanation: {r['explanation']}
+
+"""
+    
+    return results_display
+
+def get_dashboard():
+    if not edu_system.current_user:
+        return "❌ Please login first"
+    
+    if edu_system.user_role == "educator":
+        return edu_system.get_educator_dashboard()
+    else:
+        return edu_system.get_student_dashboard()
+
+# Create Gradio Interface
+with gr.Blocks(title="EduTutor AI - Simplified", theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🎓 EduTutor AI - Simplified Learning Platform")
+    gr.Markdown("Powered by IBM Granite AI + Google Integration + Pinecone DB")
+    
+    with gr.Row():
+        login_email = gr.Textbox(label="📧 Google Email", placeholder="your.email@gmail.com")
+        login_role = gr.Dropdown(choices=["student", "educator"], label="👤 Role", value="student")
+        login_btn = gr.Button("🔐 Login with Google", variant="primary")
+    
+    login_status = gr.Textbox(label="Login Status", interactive=False)
+    
+    with gr.Row():
+        main_tabs = gr.Tabs(visible=False)
+        
+        with main_tabs:
+            with gr.Tab("📊 Dashboard"):
+                dashboard_output = gr.Markdown("Please login to view dashboard")
+                refresh_dashboard = gr.Button("🔄 Refresh Dashboard")
+            
+            # Educator Interface
+            educator_interface = gr.Group(visible=False)
+            with educator_interface:
+                with gr.Tab("🏫 Google Classroom"):
+                    sync_btn = gr.Button("🔄 Sync Google Classroom", variant="secondary")
+                    sync_status = gr.Textbox(label="Sync Status", lines=3)
+                
+                with gr.Tab("📝 Create Quiz"):
+                    with gr.Row():
+                        topic_input = gr.Textbox(label="📚 Topic", placeholder="e.g., Photosynthesis")
+                        num_q_input = gr.Dropdown(choices=["3", "5", "10"], label="📊 Number of Questions", value="5")
+                        difficulty_input = gr.Dropdown(choices=["Easy", "Medium", "Hard"], label="🎯 Difficulty", value="Medium")
+                    
+                    create_quiz_btn = gr.Button("🤖 Generate AI Quiz", variant="primary")
+                    quiz_creation_status = gr.Textbox(label="Creation Status")
+                    created_quiz_display = gr.Markdown()
+            
+            # Student Interface  
+            student_interface = gr.Group(visible=False)
+            with student_interface:
+                with gr.Tab("📝 Take Quiz"):
+                    quiz_id_input = gr.Textbox(label="🆔 Quiz ID", placeholder="Enter quiz ID")
+                    load_quiz_btn = gr.Button("📖 Load Quiz", variant="secondary")
+                    quiz_display = gr.Markdown()
+                    
+                    gr.Markdown("### 📝 Your Answers:")
+                    with gr.Row():
+                        q1_answer = gr.Dropdown(choices=["A", "B", "C", "D"], label="Q1")
+                        q2_answer = gr.Dropdown(choices=["A", "B", "C", "D"], label="Q2")
+                        q3_answer = gr.Dropdown(choices=["A", "B", "C", "D"], label="Q3")
+                    with gr.Row():
+                        q4_answer = gr.Dropdown(choices=["A", "B", "C", "D"], label="Q4")
+                        q5_answer = gr.Dropdown(choices=["A", "B", "C", "D"], label="Q5")
+                    
+                    submit_quiz_btn = gr.Button("📤 Submit Quiz", variant="primary")
+                    quiz_results = gr.Markdown()
+    
+    # Event handlers
+    login_btn.click(
+        login_user,
+        inputs=[login_email, login_role],
+        outputs=[login_status, main_tabs, educator_interface, student_interface]
+    )
+    
+    refresh_dashboard.click(get_dashboard, outputs=dashboard_output)
+    
+    sync_btn.click(sync_classroom, outputs=sync_status)
+    
+    create_quiz_btn.click(
+        create_quiz,
+        inputs=[topic_input, num_q_input, difficulty_input],
+        outputs=[quiz_creation_status, created_quiz_display]
+    )
+    
+    load_quiz_btn.click(load_quiz_for_student, inputs=quiz_id_input, outputs=quiz_display)
+    
+    submit_quiz_btn.click(
+        submit_student_quiz,
+        inputs=[quiz_id_input, q1_answer, q2_answer, q3_answer, q4_answer, q5_answer],
+        outputs=quiz_results
+    )
+
+# Launch the application
+if _name_ == "_main_":
+    demo.launch(
+        share=True,
+        debug=True,
+        server_name="0.0.0.0",
+        server_port=7860
+    
